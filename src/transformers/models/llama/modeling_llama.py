@@ -507,6 +507,7 @@ class LlamaSdpaAttention(LlamaAttention):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
+        cla_key_value_states: Optional[Tuple[torch.Tensor]] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
@@ -527,21 +528,41 @@ class LlamaSdpaAttention(LlamaAttention):
 
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        if self.config.use_cla and self.layer_idx % self.config.cla_factor != 0:
+            # Use the previous layer's key value states.
+            query_states = self.q_proj(hidden_states)
+            query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+            key_states, value_states = cla_key_value_states              
+        else:
+            query_states = self.q_proj(hidden_states)
+            key_states = self.k_proj(hidden_states)
+            value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+            query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+            key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+            value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+            
+        if self.config.use_cla and self.layer_idx % self.config.cla_factor == 0:
+            # Save the current layer's key value states for the next layer.
+            cla_key_value_states = (key_states, value_states)
+        else:
+            cla_key_value_states = None
 
         cos, sin = self.rotary_emb(value_states, position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        if past_key_value is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+        # Inference Decoding.
+        if past_key_value is not None:            
+            if not self.config.use_cla:
+                # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            else:
+                if self.config.use_cla and self.layer_idx % self.config.cla_factor == 0:
+                    # Save the current layer's key value states for the next layer.
+                    cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                    cla_layer_idx = self.layer_idx // self.config.cla_factor
+                    key_states, value_states = past_key_value.update(key_states, value_states, cla_layer_idx, cache_kwargs)
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -575,7 +596,7 @@ class LlamaSdpaAttention(LlamaAttention):
 
         attn_output = self.o_proj(attn_output)
 
-        return attn_output, None, past_key_value
+        return attn_output, None, past_key_value, cla_key_value_states
 
 
 LLAMA_ATTENTION_CLASSES = {
@@ -658,6 +679,8 @@ class LlamaDecoderLayer(nn.Module):
 
         if use_cache:
             outputs += (present_key_value,)
+            
+        outputs += (cla_key_value_states,)
 
         return outputs
 
@@ -908,6 +931,7 @@ class LlamaModel(LlamaPreTrainedModel):
                 )
 
             hidden_states = layer_outputs[0]
+            cla_key_value_states = layer_outputs[-1]
 
             if use_cache:
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]
