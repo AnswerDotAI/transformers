@@ -821,6 +821,7 @@ class LlamaModel(LlamaPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        cla_key_value_states: Optional[Tuple[torch.Tensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -892,6 +893,7 @@ class LlamaModel(LlamaPreTrainedModel):
                     output_attentions,
                     use_cache,
                     cache_position,
+                    cla_key_value_states
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -902,6 +904,7 @@ class LlamaModel(LlamaPreTrainedModel):
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
+                    cla_key_value_states=cla_key_value_states
                 )
 
             hidden_states = layer_outputs[0]
@@ -1052,6 +1055,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        cla_key_value_states: Optional[Tuple[torch.Tensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
@@ -1103,6 +1107,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            cla_key_value_states=cla_key_value_states
         )
 
         hidden_states = outputs[0]
