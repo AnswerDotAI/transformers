@@ -284,43 +284,65 @@ class LlamaAttention(nn.Module):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
+        cla_key_value_states: Optional[Tuple[torch.Tensor]] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
-        if self.config.pretraining_tp > 1:
-            key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
-            query_slices = self.q_proj.weight.split(
-                (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
-            )
-            key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
-            value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
-
-            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
-            query_states = torch.cat(query_states, dim=-1)
-
-            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
-            key_states = torch.cat(key_states, dim=-1)
-
-            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
-            value_states = torch.cat(value_states, dim=-1)
-
-        else:
+        if self.config.use_cla and self.layer_idx % self.config.cla_factor != 0:
+            # Use the previous layer's key value states.
             query_states = self.q_proj(hidden_states)
-            key_states = self.k_proj(hidden_states)
-            value_states = self.v_proj(hidden_states)
+            query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+            key_states, value_states = cla_key_value_states      
+        else:
+            if self.config.pretraining_tp > 1:
+                key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
+                query_slices = self.q_proj.weight.split(
+                    (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
+                )
+                key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
+                value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+                query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
+                query_states = torch.cat(query_states, dim=-1)
 
-        cos, sin = self.rotary_emb(value_states, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+                key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
+                key_states = torch.cat(key_states, dim=-1)
 
-        if past_key_value is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+                value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
+                value_states = torch.cat(value_states, dim=-1)
+
+            else:
+                query_states = self.q_proj(hidden_states)
+                key_states = self.k_proj(hidden_states)
+                value_states = self.v_proj(hidden_states)
+
+            query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+            key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+            value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+            cos, sin = self.rotary_emb(value_states, position_ids)
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        # Inference Decoding.
+        if past_key_value is not None:            
+            if not self.config.use_cla:
+                # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            else:
+                if self.config.use_cla and self.layer_idx % self.config.cla_factor == 0:
+                    # Save the current layer's key value states for the next layer.
+                    cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                    cla_layer_idx = self.layer_idx // self.config.cla_factor
+                    key_states, value_states = past_key_value.update(key_states, value_states, cla_layer_idx, cache_kwargs)
+                    
+        # Training and Prefill.
+        if self.config.use_cla and self.layer_idx % self.config.cla_factor == 0:
+            # Save the current layer's key value states for the next layer.
+            cla_key_value_states = (key_states, value_states)
+        else:
+            cla_key_value_states = None
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -356,7 +378,7 @@ class LlamaAttention(nn.Module):
         if not output_attentions:
             attn_weights = None
 
-        return attn_output, attn_weights, past_key_value
+        return attn_output, attn_weights, past_key_value, cla_key_value_states
 
 
 class LlamaFlashAttention2(LlamaAttention):
@@ -583,6 +605,7 @@ class LlamaDecoderLayer(nn.Module):
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
+        cla_key_value_states: Optional[Tuple[torch.Tensor]] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
@@ -609,7 +632,7 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states, self_attn_weights, present_key_value, cla_key_value_states = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -617,6 +640,7 @@ class LlamaDecoderLayer(nn.Module):
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
+            cla_key_value_states=cla_key_value_states,
             **kwargs,
         )
         hidden_states = residual + hidden_states
@@ -999,6 +1023,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+        
+        logger.info("LlamaForCausalLM model initialized.")
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
