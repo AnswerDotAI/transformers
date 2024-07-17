@@ -528,41 +528,38 @@ class LlamaSdpaAttention(LlamaAttention):
 
         bsz, q_len, _ = hidden_states.size()
 
+        query_states = self.q_proj(hidden_states)
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+
         if self.config.use_cla and self.layer_idx % self.config.cla_factor != 0:
             # Use the previous layer's key value states.
-            query_states = self.q_proj(hidden_states)
-            query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-            key_states, value_states = cla_key_value_states              
+            key_states, value_states = cla_key_value_states
         else:
-            query_states = self.q_proj(hidden_states)
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
-
-            query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
             key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
             value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
             
-        if self.config.use_cla and self.layer_idx % self.config.cla_factor == 0:
-            # Save the current layer's key value states for the next layer.
+        if self.config.use_cla:
+            # Always pass the current key value states to the next layer.
+            # It will be recomputed if needed.
             cla_key_value_states = (key_states, value_states)
-        else:
-            cla_key_value_states = None
-
+        
         cos, sin = self.rotary_emb(value_states, position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         # Inference Decoding.
         if past_key_value is not None:            
-            if not self.config.use_cla:
-                # sin and cos are specific to RoPE models; cache_position needed for the static cache
-                cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            if self.config.use_cla and self.layer_idx % self.config.cla_factor == 0:
+                # Only store the key value states for the first layer in the shared layer group.
+                cla_layer_idx = self.layer_idx // self.config.cla_factor
+                key_states, value_states = past_key_value.update(key_states, value_states, cla_layer_idx, cache_kwargs)
+            elif not self.config.use_cla:
                 key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
             else:
-                if self.config.use_cla and self.layer_idx % self.config.cla_factor == 0:
-                    # Save the current layer's key value states for the next layer.
-                    cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-                    cla_layer_idx = self.layer_idx // self.config.cla_factor
-                    key_states, value_states = past_key_value.update(key_states, value_states, cla_layer_idx, cache_kwargs)
+                pass
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
