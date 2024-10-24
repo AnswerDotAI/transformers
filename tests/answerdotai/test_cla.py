@@ -18,8 +18,16 @@ class CrossLayerAttentionTest(unittest.TestCase):
         # Model, attention implementation, fp8 kv enabled
         ("Qwen/Qwen2.5-32B-Instruct", "eager", True),
         ("Qwen/Qwen2.5-32B-Instruct", "sdpa", True),
+        ("Qwen/Qwen2.5-32B-Instruct", "flash_attention_2", True),
         ("Qwen/Qwen2.5-32B-Instruct", "eager", False),
-        ("Qwen/Qwen2.5-32B-Instruct", "sdpa", False),   
+        ("Qwen/Qwen2.5-32B-Instruct", "sdpa", False),
+        ("Qwen/Qwen2.5-32B-Instruct", "flash_attention_2", False),
+        ("meta-llama/Llama-3.1-8B-Instruct", "eager", True),
+        ("meta-llama/Llama-3.1-8B-Instruct", "sdpa", True),
+        ("meta-llama/Llama-3.1-8B-Instruct", "flash_attention_2", True),
+        ("meta-llama/Llama-3.1-8B-Instruct", "eager", False),
+        ("meta-llama/Llama-3.1-8B-Instruct", "sdpa", False),
+        ("meta-llama/Llama-3.1-8B-Instruct", "flash_attention_2", False),
     ]
         
     def test_naive_cla(self):

@@ -207,6 +207,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
+
 def apply_rotary_pos_emb_query_only(q, cos, sin, position_ids=None, unsqueeze_dim=1):
     """Applies Rotary Position Embedding to the query tensor.
 
@@ -258,6 +259,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
         return hidden_states
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
 
 def fp8_quant_dequant(x, scale):
     # assert not x.isnan().any(), "key or value states contain NaN before fp8 quantization"
@@ -391,7 +393,7 @@ class Qwen2Attention(nn.Module):
             value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         else:
             value_states = None
-            
+
         if self.debug_kv_sharing:
             query_states = torch.ones_like(query_states)
 
@@ -401,12 +403,12 @@ class Qwen2Attention(nn.Module):
                 "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
                 "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.46 `position_ids` will be "
                 "removed and `position_embeddings` will be mandatory."
-            )                
+            )
             device_type, dtype = hidden_states.device.type, hidden_states.dtype
             cos, sin = self.rotary_emb(value_states, position_ids, device_type, dtype)
         else:
             cos, sin = position_embeddings
- 
+
         #### BEGIN: KV Compression ####
         if not self.palu_kv_compression_enabled:
             if self.compute_new_kv:
@@ -442,7 +444,7 @@ class Qwen2Attention(nn.Module):
             else:
                 # re-use
                 key_states, value_states = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
-        
+
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -756,7 +758,7 @@ class Qwen2SdpaAttention(Qwen2Attention):
             else:
                 query_states = apply_rotary_pos_emb_query_only(query_states, cos, sin)
         #### END: KV Compression ####
-        
+
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
@@ -895,7 +897,7 @@ class Qwen2DecoderLayer(nn.Module):
 
         if use_cache:
             outputs += (present_key_value,)
-        
+
         if cla_key_value is not None:
             outputs += (cla_key_value,)
 
@@ -1173,7 +1175,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
-                
+
             if cla_key_value is not None:
                 cla_key_value = layer_outputs[-1]
 
