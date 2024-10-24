@@ -204,8 +204,32 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
     q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin) if k is not None else None
+    k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
+
+def apply_rotary_pos_emb_query_only(q, cos, sin, position_ids=None, unsqueeze_dim=1):
+    """Applies Rotary Position Embedding to the query tensor.
+
+    Args:
+        q (`torch.Tensor`): The query tensor.
+        cos (`torch.Tensor`): The cosine part of the rotary embedding.
+        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        position_ids (`torch.Tensor`, *optional*):
+            Deprecated and unused.
+        unsqueeze_dim (`int`, *optional*, defaults to 1):
+            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
+            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
+            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
+            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
+            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+    Returns:
+        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+    """
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    return q_embed
 
 
 # Copied from transformers.models.mistral.modeling_mistral.MistralMLP with Mistral->Qwen2
@@ -388,7 +412,7 @@ class Qwen2Attention(nn.Module):
             if self.compute_new_kv:
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
             else:
-                query_states, _ = apply_rotary_pos_emb(query_states, None, cos, sin)
+                query_states = apply_rotary_pos_emb_query_only(query_states, cos, sin)
         # 1. PALU KV down projection.
         # 2. KV fp8 quantization.  
         if self.use_fp8_kv_scale and self.compute_new_kv:
@@ -404,7 +428,7 @@ class Qwen2Attention(nn.Module):
             if self.compute_new_kv:
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
             else:
-                query_states, _ = apply_rotary_pos_emb(query_states, None, cos, sin)
+                query_states = apply_rotary_pos_emb_query_only(query_states, cos, sin)
         #### END: KV Compression ####
         
         if past_key_value is not None:
@@ -515,7 +539,7 @@ class Qwen2FlashAttention2(Qwen2Attention):
             if self.compute_new_kv:
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
             else:
-                query_states, _ = apply_rotary_pos_emb(query_states, None, cos, sin)
+                query_states = apply_rotary_pos_emb_query_only(query_states, cos, sin)
         # 1. PALU KV down projection.
         
         # 2. KV fp8 quantization.  
@@ -534,7 +558,7 @@ class Qwen2FlashAttention2(Qwen2Attention):
             if self.compute_new_kv:
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
             else:
-                query_states, _ = apply_rotary_pos_emb(query_states, None, cos, sin)
+                query_states = apply_rotary_pos_emb_query_only(query_states, cos, sin)
         #### END: KV Compression ####
 
         if past_key_value is not None:
@@ -711,7 +735,7 @@ class Qwen2SdpaAttention(Qwen2Attention):
             if self.compute_new_kv:
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
             else:
-                query_states, _ = apply_rotary_pos_emb(query_states, None, cos, sin)
+                query_states = apply_rotary_pos_emb_query_only(query_states, cos, sin)
         # 1. PALU KV down projection.
         
         # 2. KV fp8 quantization.  
@@ -730,7 +754,7 @@ class Qwen2SdpaAttention(Qwen2Attention):
             if self.compute_new_kv:
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
             else:
-                query_states, _ = apply_rotary_pos_emb(query_states, None, cos, sin)
+                query_states = apply_rotary_pos_emb_query_only(query_states, cos, sin)
         #### END: KV Compression ####
         
         if past_key_value is not None:

@@ -52,7 +52,7 @@ class CrossLayerAttentionTest(unittest.TestCase):
                 cfg.cla_kv_cache_map = None
                 model = AutoModelForCausalLM.from_config(cfg)
                 model.to(device="cuda", dtype=torch.bfloat16)
-                model.load_state_dict(model_state_dict);
+                model.load_state_dict(model_state_dict)
                 base_output = model(x)
 
                 assert torch.equal(test_output.logits, base_output.logits)            
@@ -87,7 +87,7 @@ class CrossLayerAttentionTest(unittest.TestCase):
                 x = torch.arange(32, device="cuda").view(1,-1)
                 
                 model = AutoModelForCausalLM.from_config(cfg)
-                model.to(device="cuda", dtype=torch.bfloat16);
+                model.to(device="cuda", dtype=torch.bfloat16)
                 
                 assert model.config.use_fp8_kv_scale == fp8_kv_enabled
                 assert model.config.cla_kv_cache_map == {0:0, 1:1, 2:1, 3:0}
