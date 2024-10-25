@@ -363,8 +363,8 @@ class LlamaAttention(nn.Module):
         
         if self.use_fp8_kv_scale:
             logger.warning_once("KV fp8 quantization is enabled.")
-            self.k_scale = torch.nn.Parameter(torch.tensor(0.1))
-            self.v_scale = torch.nn.Parameter(torch.tensor(0.1))
+            self.k_scale = torch.nn.Parameter(torch.tensor([0.1]))
+            self.v_scale = torch.nn.Parameter(torch.tensor([0.1]))
             
         # Cross Layer Attention (CLA).
         # Example of cla_kv_cache_map with 8 layers:

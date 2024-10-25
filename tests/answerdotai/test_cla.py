@@ -113,3 +113,53 @@ class CrossLayerAttentionTest(unittest.TestCase):
                 assert torch.equal(attn_outputs[0], attn_outputs[3])
                 assert torch.equal(attn_outputs[1], attn_outputs[2])
                 assert not torch.equal(attn_outputs[0], attn_outputs[1])
+                
+    def test_training_with_cla(self):
+        """
+        Test that parameters are updated correctly:
+        
+        layer 0 k_proj, v_proj, k_scale, v_scale should be updated
+        layer 1 k_proj, v_proj shouldn't be updated
+        """
+        model_name = "Qwen/Qwen2.5-32B-Instruct"
+        attn_impl = "eager"
+        fp8_kv_enabled = True
+
+        cfg = AutoConfig.from_pretrained(model_name)
+        cfg.num_hidden_layers = 2
+        cfg.hidden_size //= 8
+        cfg.intermediate_size //= 8
+        cfg.num_attention_heads //= 2
+        cfg.num_key_value_heads //= 2
+        cfg._attn_implementation = attn_impl
+        cfg.use_fp8_kv_scale = fp8_kv_enabled
+        cfg.cla_kv_cache_map = {0: 0, 1: 0}
+        cfg.palu_kv_compression_enabled = False
+        cfg.use_cache = False
+        cfg.debug_kv_sharing = True
+
+        model = AutoModelForCausalLM.from_config(cfg)
+        model.to(device="cuda", dtype=torch.bfloat16)
+
+        model.train()
+
+        # Perform a forward and backward pass
+        x = torch.arange(32, device="cuda").view(1, -1)
+        output = model(x)
+        loss = output.logits.sum()
+        loss.backward()
+
+        # Check which parameters have been updated
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                updated = torch.any(param.grad != 0)
+                if "layers.0" in name:
+                    if any(proj in name for proj in ["k_proj", "v_proj"]):
+                        self.assertTrue(updated, f"{name} should be updated")
+                    if fp8_kv_enabled and any(scale in name for scale in ["k_scale", "v_scale"]):
+                        self.assertTrue(updated, f"{name} should be updated")
+                elif "layers.1" in name:
+                    if any(proj in name for proj in ["k_proj", "v_proj"]):
+                        self.assertFalse(updated, f"{name} should not be updated")
+                else:
+                    self.assertTrue(updated, f"{name} should be updated")
