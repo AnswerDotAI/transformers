@@ -357,6 +357,7 @@ class Qwen2Attention(nn.Module):
             self.compute_new_kv = compute_new_kv_map(self.cla_kv_cache_map)[self.layer_idx]     
         else:
             self.compute_new_kv = True
+        self.cla_kv_detached = config.__dict__.get("cla_kv_detached", True)
         self.debug_kv_sharing = config.__dict__.get("debug_kv_sharing", False)
         
         # TODO: MLRD PALU.
@@ -440,7 +441,10 @@ class Qwen2Attention(nn.Module):
         if cla_key_value is not None:
             if self.compute_new_kv:
                 # update
-                cla_key_value.append((key_states, value_states))
+                if self.cla_kv_detached:
+                    cla_key_value.append((key_states.detach(), value_states.detach()))
+                else:
+                    cla_key_value.append((key_states, value_states))
             else:
                 # re-use
                 key_states, value_states = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
@@ -596,7 +600,10 @@ class Qwen2FlashAttention2(Qwen2Attention):
         if cla_key_value is not None:
             if self.compute_new_kv:
                 # update
-                cla_key_value.append((key_states, value_states))
+                if self.cla_kv_detached:
+                    cla_key_value.append((key_states.detach(), value_states.detach()))
+                else:
+                    cla_key_value.append((key_states, value_states))
             else:
                 # re-use
                 key_states, value_states = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
@@ -766,7 +773,10 @@ class Qwen2SdpaAttention(Qwen2Attention):
         if cla_key_value is not None:
             if self.compute_new_kv:
                 # update
-                cla_key_value.append((key_states, value_states))
+                if self.cla_kv_detached:
+                    cla_key_value.append((key_states.detach(), value_states.detach()))
+                else:
+                    cla_key_value.append((key_states, value_states))
             else:
                 # re-use
                 key_states, value_states = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
