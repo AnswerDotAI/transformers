@@ -275,18 +275,20 @@ def fp8_quant_dequant(x, scale):
     return x_dequant
 
 
-def compute_new_kv_map(cla_kv_cache_map) -> dict[int, bool]:
+def create_compute_new_kv_map(cla_kv_cache_map) -> dict[int, bool]:
     "Returns a dict of decoder layer idxs and whether KV needs to be computed at that layer to be cached."
     if cla_kv_cache_map is None: return {}
-    comput_new_kv_map = {}
+    compute_new_kv_map = {}
     is_seen = set()
     for k,v in cla_kv_cache_map.items():
-        if v not in is_seen:
-            comput_new_kv_map[k] = True
+        if v == -1:
+            compute_new_kv_map[k] = True
+        elif v not in is_seen:
+            compute_new_kv_map[k] = True
             is_seen.add(v)
         else:
-            comput_new_kv_map[k] = False
-    return comput_new_kv_map
+            compute_new_kv_map[k] = False
+    return compute_new_kv_map
 
 
 class Qwen2Attention(nn.Module):
@@ -354,7 +356,7 @@ class Qwen2Attention(nn.Module):
         self.cla_kv_cache_map = config.__dict__.get("cla_kv_cache_map", None)
         if self.cla_kv_cache_map is not None:
             logger.warning_once("Cross Layer Attention (CLA) is enabled.")
-            self.compute_new_kv = compute_new_kv_map(self.cla_kv_cache_map)[self.layer_idx]     
+            self.compute_new_kv = create_compute_new_kv_map(self.cla_kv_cache_map)[self.layer_idx]
         else:
             self.compute_new_kv = True
         self.cla_kv_detached = config.__dict__.get("cla_kv_detached", True)
@@ -438,15 +440,14 @@ class Qwen2Attention(nn.Module):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)   
             
-        if cla_key_value is not None:
+        # update or re-use kv.
+        if cla_key_value is not None and self.cla_kv_cache_map[self.layer_idx] != -1:
             if self.compute_new_kv:
-                # update
                 if self.cla_kv_detached:
                     cla_key_value.append((key_states.detach(), value_states.detach()))
                 else:
                     cla_key_value.append((key_states, value_states))
             else:
-                # re-use
                 key_states, value_states = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
 
         # repeat k/v heads if n_kv_heads < n_heads
@@ -597,15 +598,14 @@ class Qwen2FlashAttention2(Qwen2Attention):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        if cla_key_value is not None:
+        # update or re-use kv.
+        if cla_key_value is not None and self.cla_kv_cache_map[self.layer_idx] != -1:
             if self.compute_new_kv:
-                # update
                 if self.cla_kv_detached:
                     cla_key_value.append((key_states.detach(), value_states.detach()))
                 else:
                     cla_key_value.append((key_states, value_states))
             else:
-                # re-use
                 key_states, value_states = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
         
         # repeat k/v heads if n_kv_heads < n_heads
@@ -770,15 +770,14 @@ class Qwen2SdpaAttention(Qwen2Attention):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        if cla_key_value is not None:
+        # update or re-use kv.
+        if cla_key_value is not None and self.cla_kv_cache_map[self.layer_idx] != -1:
             if self.compute_new_kv:
-                # update
                 if self.cla_kv_detached:
                     cla_key_value.append((key_states.detach(), value_states.detach()))
                 else:
                     cla_key_value.append((key_states, value_states))
             else:
-                # re-use
                 key_states, value_states = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
