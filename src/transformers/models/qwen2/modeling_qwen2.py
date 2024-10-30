@@ -180,6 +180,11 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
+def _apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    if k is None: return apply_rotary_pos_emb_query_only(q, cos, sin, position_ids, unsqueeze_dim), None
+    else: return apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim)
+
+
 # Copied from transformers.models.llama.modeling_llama.apply_rotary_pos_emb
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     """Applies Rotary Position Embedding to the query and key tensors.
@@ -361,6 +366,7 @@ class Qwen2Attention(nn.Module):
             self.compute_new_kv = True
         self.cla_kv_detached = config.__dict__.get("cla_kv_detached", True)
         self.debug_kv_sharing = config.__dict__.get("debug_kv_sharing", False)
+        self.cla_shared_coef = config.__dict__.get("cla_shared_coef", 0.0)
         
         # TODO: MLRD PALU.
         if self.palu_kv_compression_enabled:
@@ -386,16 +392,20 @@ class Qwen2Attention(nn.Module):
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
-        if self.compute_new_kv:
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # If we are on a shared layer (self.compute_new_kv is False), we mix the old kv cache (old_alpha > 0)
+        # with the new kv (new_alpha = 1 - old_alpha). Otherwise, we use 100% of the new kv (new_alpha = 1).
+        old_alpha = 0.0 if self.compute_new_kv else self.cla_shared_coef
+        new_alpha = 1.0 - old_alpha
+        # If we are using any of the new kv, we need to compute it.
+        need_new_kv = new_alpha > 0.0        
+        key_states = value_states = None
+        if need_new_kv:
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
-
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        if self.compute_new_kv:
             key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
             value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        else:
-            value_states = None
 
         if self.debug_kv_sharing:
             query_states = torch.ones_like(query_states)
@@ -414,33 +424,28 @@ class Qwen2Attention(nn.Module):
 
         #### BEGIN: KV Compression ####
         if not self.palu_kv_compression_enabled:
-            if self.compute_new_kv:
-                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-            else:
-                query_states = apply_rotary_pos_emb_query_only(query_states, cos, sin)
+            query_states, key_states = _apply_rotary_pos_emb(query_states, key_states, cos, sin)
         # 1. PALU KV down projection.
-        # 2. KV fp8 quantization.  
-        if self.use_fp8_kv_scale and self.compute_new_kv:
+        # 2. KV fp8 quantization.
+        if self.use_fp8_kv_scale and key_states is not None:
             key_states = fp8_quant_dequant(key_states, self.k_scale)
             value_states = fp8_quant_dequant(value_states, self.v_scale)
         # 3. PALU KV up projection.
-        # 4. PALU ROPE. 
+        # 4. PALU ROPE.
         # If PALU is enabled, key rotary embeddings are applied after the up projection.
         # This is because palu key down projection is fused to k_proj at inference time.
         # Order at inference will be down projection -> fp8 quantization -> write cache.
         # read cache -> fp8 dequantization -> up projection -> rope.
         if self.palu_kv_compression_enabled:
-            if self.compute_new_kv:
-                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-            else:
-                query_states = apply_rotary_pos_emb_query_only(query_states, cos, sin)
+            query_states, key_states = _apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
         #### END: KV Compression ####
         
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)   
-            
-        # update or re-use kv.
+
+        # Update or Re-use KV.
         if cla_key_value is not None and self.cla_kv_cache_map[self.layer_idx] != -1:
             if self.compute_new_kv:
                 if self.cla_kv_detached:
@@ -448,7 +453,9 @@ class Qwen2Attention(nn.Module):
                 else:
                     cla_key_value.append((key_states, value_states))
             else:
-                key_states, value_states = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
+                old_keys, old_values = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
+                key_states = old_alpha * old_keys + new_alpha * key_states
+                value_states = old_alpha * old_values + new_alpha * value_states
 
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -515,16 +522,20 @@ class Qwen2FlashAttention2(Qwen2Attention):
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
-        if self.compute_new_kv:
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # If we are on a shared layer (self.compute_new_kv is False), we mix the old kv cache (old_alpha > 0)
+        # with the new kv (new_alpha = 1 - old_alpha). Otherwise, we use 100% of the new kv (new_alpha = 1).
+        old_alpha = 0.0 if self.compute_new_kv else self.cla_shared_coef
+        new_alpha = 1.0 - old_alpha
+        # If we are using any of the new kv, we need to compute it.
+        need_new_kv = new_alpha > 0.0        
+        key_states = value_states = None
+        if need_new_kv:
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
-
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        if self.compute_new_kv:
             key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
             value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        else:
-            value_states = None
 
         if self.debug_kv_sharing:
             query_states = torch.ones_like(query_states)
@@ -562,10 +573,7 @@ class Qwen2FlashAttention2(Qwen2Attention):
         # Order at inference will be down projection -> fp8 quantization -> write cache.
         # read cache -> fp8 dequantization -> up projection -> rope.
         if self.palu_kv_compression_enabled:
-            if self.compute_new_kv:
-                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-            else:
-                query_states = apply_rotary_pos_emb_query_only(query_states, cos, sin)
+            query_states, key_states = _apply_rotary_pos_emb(query_states, key_states, cos, sin)
         #### END: KV Compression ####
 
         if past_key_value is not None:
@@ -606,7 +614,9 @@ class Qwen2FlashAttention2(Qwen2Attention):
                 else:
                     cla_key_value.append((key_states, value_states))
             else:
-                key_states, value_states = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
+                old_keys, old_values = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
+                key_states = old_alpha * old_keys + new_alpha * key_states
+                value_states = old_alpha * old_values + new_alpha * value_states
         
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -713,16 +723,20 @@ class Qwen2SdpaAttention(Qwen2Attention):
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
-        if self.compute_new_kv:
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+    
+        # If we are on a shared layer (self.compute_new_kv is False), we mix the old kv cache (old_alpha > 0)
+        # with the new kv (new_alpha = 1 - old_alpha). Otherwise, we use 100% of the new kv (new_alpha = 1).
+        old_alpha = 0.0 if self.compute_new_kv else self.cla_shared_coef
+        new_alpha = 1.0 - old_alpha
+        # If we are using any of the new kv, we need to compute it.
+        need_new_kv = new_alpha > 0.0        
+        key_states = value_states = None
+        if need_new_kv:
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
-
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        if self.compute_new_kv:
             key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
             value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        else:
-            value_states = None
             
         if self.debug_kv_sharing:
             query_states = torch.ones_like(query_states)            
@@ -741,10 +755,7 @@ class Qwen2SdpaAttention(Qwen2Attention):
 
         #### BEGIN: KV Compression ####
         if not self.palu_kv_compression_enabled:
-            if self.compute_new_kv:
-                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-            else:
-                query_states = apply_rotary_pos_emb_query_only(query_states, cos, sin)
+            query_states, key_states = _apply_rotary_pos_emb(query_states, key_states, cos, sin)
         # 1. PALU KV down projection.
         
         # 2. KV fp8 quantization.  
@@ -760,17 +771,14 @@ class Qwen2SdpaAttention(Qwen2Attention):
         # Order at inference will be down projection -> fp8 quantization -> write cache.
         # read cache -> fp8 dequantization -> up projection -> rope.
         if self.palu_kv_compression_enabled:
-            if self.compute_new_kv:
-                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-            else:
-                query_states = apply_rotary_pos_emb_query_only(query_states, cos, sin)
+            query_states, key_states = _apply_rotary_pos_emb(query_states, key_states, cos, sin)
         #### END: KV Compression ####
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        # update or re-use kv.
+        # Update or Re-use KV.
         if cla_key_value is not None and self.cla_kv_cache_map[self.layer_idx] != -1:
             if self.compute_new_kv:
                 if self.cla_kv_detached:
@@ -778,7 +786,9 @@ class Qwen2SdpaAttention(Qwen2Attention):
                 else:
                     cla_key_value.append((key_states, value_states))
             else:
-                key_states, value_states = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
+                old_keys, old_values = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
+                key_states = old_alpha * old_keys + new_alpha * key_states
+                value_states = old_alpha * old_values + new_alpha * value_states
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
