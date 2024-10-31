@@ -427,7 +427,7 @@ class Qwen2Attention(nn.Module):
             query_states, key_states = _apply_rotary_pos_emb(query_states, key_states, cos, sin)
         # 1. PALU KV down projection.
         # 2. KV fp8 quantization.
-        if self.use_fp8_kv_scale and key_states is not None:
+        if need_new_kv and self.use_fp8_kv_scale:
             key_states = fp8_quant_dequant(key_states, self.k_scale)
             value_states = fp8_quant_dequant(value_states, self.v_scale)
         # 3. PALU KV up projection.
@@ -554,14 +554,11 @@ class Qwen2FlashAttention2(Qwen2Attention):
         
         #### BEGIN: KV Compression ####
         if not self.palu_kv_compression_enabled:
-            if self.compute_new_kv:
-                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-            else:
-                query_states = apply_rotary_pos_emb_query_only(query_states, cos, sin)
+            query_states, key_states = _apply_rotary_pos_emb(query_states, key_states, cos, sin)
         # 1. PALU KV down projection.
         
         # 2. KV fp8 quantization.  
-        if self.compute_new_kv and self.use_fp8_kv_scale:
+        if need_new_kv and self.use_fp8_kv_scale:
             key_states = fp8_quant_dequant(key_states, self.k_scale)
             value_states = fp8_quant_dequant(value_states, self.v_scale)
 
@@ -759,7 +756,7 @@ class Qwen2SdpaAttention(Qwen2Attention):
         # 1. PALU KV down projection.
         
         # 2. KV fp8 quantization.  
-        if self.compute_new_kv and self.use_fp8_kv_scale:
+        if need_new_kv and self.use_fp8_kv_scale:
             key_states = fp8_quant_dequant(key_states, self.k_scale)
             value_states = fp8_quant_dequant(value_states, self.v_scale)
 
