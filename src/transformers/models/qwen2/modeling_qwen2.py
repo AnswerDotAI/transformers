@@ -1073,6 +1073,14 @@ class Qwen2Model(Qwen2PreTrainedModel):
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
+        
+    def update_cla_coef(self, new_coef):
+        """
+        Update the coefficient for the shared KV cache in CLA.
+        """
+        self.config.cla_shared_coef = new_coef
+        for layer in self.layers:
+            layer.self_attn.cla_shared_coef = new_coef
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -1391,6 +1399,9 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
     def get_decoder(self):
         return self.model
+    
+    def update_cla_coef(self, new_coef):
+        self.model.update_cla_coef(new_coef)
 
     @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
