@@ -447,15 +447,17 @@ class Qwen2Attention(nn.Module):
 
         # Update or Re-use KV.
         if cla_key_value is not None and self.cla_kv_cache_map[self.layer_idx] != -1:
-            if self.compute_new_kv:
+            if self.compute_new_kv:  # Using New KV
                 if self.cla_kv_detached:
                     cla_key_value.append((key_states.detach(), value_states.detach()))
                 else:
                     cla_key_value.append((key_states, value_states))
-            else:
+            elif need_new_kv:  # Using Mixed Shared-New KV
                 old_keys, old_values = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
                 key_states = old_alpha * old_keys + new_alpha * key_states
                 value_states = old_alpha * old_values + new_alpha * value_states
+            else:  # Using Shared KV
+                key_states, value_states = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
 
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -605,15 +607,17 @@ class Qwen2FlashAttention2(Qwen2Attention):
 
         # update or re-use kv.
         if cla_key_value is not None and self.cla_kv_cache_map[self.layer_idx] != -1:
-            if self.compute_new_kv:
+            if self.compute_new_kv:  # Using New KV
                 if self.cla_kv_detached:
                     cla_key_value.append((key_states.detach(), value_states.detach()))
                 else:
                     cla_key_value.append((key_states, value_states))
-            else:
+            elif need_new_kv:  # Using Mixed Shared-New KV
                 old_keys, old_values = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
                 key_states = old_alpha * old_keys + new_alpha * key_states
                 value_states = old_alpha * old_values + new_alpha * value_states
+            else:  # Using Shared KV
+                key_states, value_states = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
         
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -777,15 +781,17 @@ class Qwen2SdpaAttention(Qwen2Attention):
 
         # Update or Re-use KV.
         if cla_key_value is not None and self.cla_kv_cache_map[self.layer_idx] != -1:
-            if self.compute_new_kv:
+            if self.compute_new_kv:  # Using New KV
                 if self.cla_kv_detached:
                     cla_key_value.append((key_states.detach(), value_states.detach()))
                 else:
                     cla_key_value.append((key_states, value_states))
-            else:
+            elif need_new_kv:  # Using Mixed Shared-New KV
                 old_keys, old_values = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
                 key_states = old_alpha * old_keys + new_alpha * key_states
                 value_states = old_alpha * old_values + new_alpha * value_states
+            else:  # Using Shared KV
+                key_states, value_states = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
