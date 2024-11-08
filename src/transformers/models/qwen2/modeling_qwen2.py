@@ -322,7 +322,8 @@ class Qwen2Attention(nn.Module):
         self.rope_theta = config.rope_theta
         self.is_causal = True
         self.attention_dropout = config.attention_dropout
-
+        self.cla_adapters = config.__dict__.get("cla_adapters", False)
+        
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
@@ -366,8 +367,21 @@ class Qwen2Attention(nn.Module):
             self.compute_new_kv = True
         self.cla_kv_detached = config.__dict__.get("cla_kv_detached", True)
         self.debug_kv_sharing = config.__dict__.get("debug_kv_sharing", False)
-        self.cla_shared_coef = config.__dict__.get("cla_shared_coef", 0.0)
+        self.cla_shared_coef = config.__dict__.get("cla_shared_coef", 1.0)
         
+        if not self.compute_new_kv and self.cla_adapters:
+            recovery_dim = self.head_dim  # self.num_key_value_heads
+            self.k_recovery = nn.Linear(recovery_dim, recovery_dim, bias=True)
+            self.v_recovery = nn.Linear(recovery_dim, recovery_dim, bias=True)
+            
+            def init_identity(layer):
+                layer.weight.data.zero_()
+                layer.weight.data.fill_diagonal_(1.0)
+                layer.bias.data.zero_()
+
+            init_identity(self.k_recovery)
+            init_identity(self.v_recovery)
+
         # TODO: MLRD PALU.
         if self.palu_kv_compression_enabled:
             logger.warning_once("MLRD PALU is enabled.")
@@ -614,6 +628,8 @@ class Qwen2FlashAttention2(Qwen2Attention):
                     cla_key_value.append((key_states, value_states))
             elif need_new_kv:  # Using Mixed Shared-New KV
                 old_keys, old_values = cla_key_value[self.cla_kv_cache_map[self.layer_idx]]
+                if self.cla_adapters:
+                    old_keys, old_values = self.k_recovery(old_keys), self.v_recovery(old_values)
                 key_states = old_alpha * old_keys + new_alpha * key_states
                 value_states = old_alpha * old_values + new_alpha * value_states
             else:  # Using Shared KV
