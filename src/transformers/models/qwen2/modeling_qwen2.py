@@ -299,7 +299,8 @@ class Qwen2Attention(nn.Module):
 
     def __init__(self, config: Qwen2Config, layer_idx: Optional[int] = None):
         super().__init__()
-        self.config = config
+        from copy import deepcopy
+        self.config = deepcopy(config)  # able to make local changes to config
         self.layer_idx = layer_idx
         if layer_idx is None:
             logger.warning_once(
@@ -361,6 +362,12 @@ class Qwen2Attention(nn.Module):
             self.compute_new_kv = True
         self.cla_kv_detached = config.__dict__.get("cla_kv_detached", True)
         self.debug_kv_sharing = config.__dict__.get("debug_kv_sharing", False)
+        
+        # Set up local global attention.
+        local_layers = config.__dict__.get("local_layers", None)
+        self.config.use_sliding_window = layer_idx in local_layers
+        if self.config.use_sliding_window:
+            print(f"Layer {self.layer_idx} is using sliding window attention.")
         
         # TODO: MLRD PALU.
         if self.palu_kv_compression_enabled:
@@ -499,6 +506,7 @@ class Qwen2FlashAttention2(Qwen2Attention):
         # flash_attn<2.1 generates top-left aligned causal mask, while what is needed here is bottom-right alignement, that was made default for flash_attn>=2.1. This attribute is used to handle this difference. Reference: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.1.0.
         # Beware that with flash_attn<2.1, using q_seqlen != k_seqlen (except for the case q_seqlen == 1) produces a wrong mask (top-left).
         self._flash_attn_uses_top_left_mask = not is_flash_attn_greater_or_equal_2_10()
+        
 
     def forward(
         self,
