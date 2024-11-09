@@ -657,7 +657,10 @@ class Qwen2FlashAttention2(Qwen2Attention):
             sliding_window = self.config.sliding_window
         else:
             sliding_window = None
-
+            
+        if sliding_window is not None:
+            print(f"Using sliding window of size {sliding_window} for layer {self.layer_idx}")
+        
         attn_output = _flash_attention_forward(
             query_states,
             key_states,
